@@ -1,0 +1,16 @@
+apiVersion: v2
+name: example-app
+description: A Helm chart for example application
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - example
+  - app
+  - local
+home: https://example.com
+sources:
+  - https://github.com/example/example-app
+maintainers:
+  - name: Local Developer
+    email: local@example.com
