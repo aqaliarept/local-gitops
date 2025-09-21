@@ -27,7 +27,6 @@ func init() {
 	initCmd.Flags().StringVar(&initArgoCDPort, "argocd-port", "8083", "ArgoCD server port")
 	initCmd.Flags().StringVar(&initChartMuseumPort, "chartmuseum-port", "8084", "ChartMuseum server port")
 	initCmd.Flags().StringVar(&initGitServerPort, "git-server-port", "8085", "Git server port")
-	rootCmd.AddCommand(initCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {

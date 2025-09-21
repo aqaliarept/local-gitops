@@ -20,7 +20,6 @@ var statusCmd = &cobra.Command{
 
 func init() {
 	statusCmd.Flags().StringVar(&statusTargetDir, "target-dir", ".", "Target directory containing .gitops-config.yaml")
-	rootCmd.AddCommand(statusCmd)
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
