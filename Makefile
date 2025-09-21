@@ -1,6 +1,6 @@
 # Local GitOps CLI Makefile
 
-.PHONY: build install test clean version help
+.PHONY: build install test clean version help tag-patch push-tag
 
 # Version information
 VERSION ?= dev
@@ -53,3 +53,23 @@ release-build: ## Build release version
 
 release-install: ## Install release version
 	@$(MAKE) install VERSION=$(VERSION)
+
+# Version management targets
+tag-patch: ## Increment patch version (v0.0.1 -> v0.0.2)
+	@$(eval CURRENT_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"))
+	@$(eval CURRENT_VERSION := $(shell echo $(CURRENT_TAG) | sed 's/v//'))
+	@$(eval NEW_VERSION := $(shell echo $(CURRENT_VERSION) | awk -F. '{print $$1"."$$2"."($$3+1)}'))
+	@$(eval NEW_TAG := v$(NEW_VERSION))
+	@echo "Current tag: $(CURRENT_TAG)"
+	@echo "New tag: $(NEW_TAG)"
+	@git tag -a $(NEW_TAG) -m "Release $(NEW_TAG): Patch version increment"
+	@echo "✅ Created tag $(NEW_TAG)"
+
+push-tag: ## Push the latest tag to remote
+	@$(eval LATEST_TAG := $(shell git describe --tags --abbrev=0))
+	@echo "Pushing tag $(LATEST_TAG) to remote..."
+	@git push origin $(LATEST_TAG)
+	@echo "✅ Tag $(LATEST_TAG) pushed to remote"
+
+release-patch: tag-patch push-tag ## Create patch release (tag + push)
+	@echo "✅ Patch release completed"
