@@ -40,7 +40,7 @@ kubectl exec -n git-server deployment/git-server -- mkdir -p /git
 
 # Copy manifests to Git server
 echo -e "${YELLOW}📋 Copying manifests to Git server...${NC}"
-kubectl cp manifests/. git-server/$(kubectl get pods -n git-server -l app=git-server -o jsonpath='{.items[0].metadata.name}'):/tmp/manifests
+kubectl cp manifest.git/. git-server/$(kubectl get pods -n git-server -l app=git-server -o jsonpath='{.items[0].metadata.name}'):/tmp/manifests
 
 # Initialize Git repository
 echo -e "${YELLOW}🔧 Initializing Git repository...${NC}"

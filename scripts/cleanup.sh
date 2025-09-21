@@ -56,13 +56,13 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo -e "${GREEN}✅ Packages directory removed${NC}"
     fi
     
-    # Reset manifests git repository
-    if [ -d "./manifests/.git" ]; then
-        cd "./manifests"
+    # Reset manifest.git repository
+    if [ -d "./manifest.git/.git" ]; then
+        cd "./manifest.git"
         git clean -fd
         git reset --hard HEAD
         cd ..
-        echo -e "${GREEN}✅ Manifests directory reset${NC}"
+        echo -e "${GREEN}✅ Manifest.git repository reset${NC}"
     fi
     
     # Remove charts directory contents

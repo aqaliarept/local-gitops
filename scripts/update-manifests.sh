@@ -6,7 +6,7 @@
 set -e
 
 # Configuration
-VALUES_FILE="./manifests/example-app-values.yaml"
+VALUES_FILE="./manifest.git/example-app-values.yaml"
 TAG_FILE=".image-tag"
 
 # Check if tag file exists
@@ -27,4 +27,4 @@ if [ -f "$VALUES_FILE.bak" ]; then
 fi
 
 echo "Values manifest updated: $VALUES_FILE"
-echo "Using image: localhost:5001/example-app:$TAG"
+echo "Using image: k3d-myregistry.localhost:5001/example-app:$TAG"
