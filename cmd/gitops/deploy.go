@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,13 +21,18 @@ var deployCmd = &cobra.Command{
 var (
 	appName         = "nginx-app"
 	argocdNamespace = "argocd"
+	deployTargetDir string
 )
+
+func init() {
+	deployCmd.Flags().StringVar(&deployTargetDir, "target-dir", ".", "Target directory containing .gitops-config.yaml")
+}
 
 func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Println("🚀 Deploying application...")
 
 	// Read configuration
-	config, err := readConfig(".")
+	config, err := readConfig(deployTargetDir)
 	if err != nil {
 		return fmt.Errorf("failed to read config: %w", err)
 	}
@@ -41,12 +47,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	// Apply bootstrap.yaml to create ArgoCD application
-	if err := applyBootstrap(); err != nil {
+	if err := applyBootstrap(deployTargetDir); err != nil {
 		return fmt.Errorf("failed to apply bootstrap: %w", err)
 	}
 
 	// Push manifest content to Git repository
-	if err := pushManifestContent(config); err != nil {
+	if err := pushManifestContent(config, deployTargetDir); err != nil {
 		return fmt.Errorf("failed to push manifest content: %w", err)
 	}
 
@@ -94,13 +100,13 @@ func checkDeployPrerequisites(clusterName string) error {
 	return nil
 }
 
-func applyBootstrap() error {
+func applyBootstrap(targetDir string) error {
 	fmt.Println("📋 Applying bootstrap.yaml...")
 
-	// Check if bootstrap.yaml exists in current directory
-	bootstrapPath := "bootstrap.yaml"
+	// Check if bootstrap.yaml exists in target directory
+	bootstrapPath := filepath.Join(targetDir, "bootstrap.yaml")
 	if _, err := os.Stat(bootstrapPath); err != nil {
-		return fmt.Errorf("bootstrap.yaml not found: %w", err)
+		return fmt.Errorf("bootstrap.yaml not found in %s: %w", targetDir, err)
 	}
 
 	// Apply bootstrap.yaml
@@ -113,7 +119,7 @@ func applyBootstrap() error {
 	return nil
 }
 
-func pushManifestContent(config *Config) error {
+func pushManifestContent(config *Config, targetDir string) error {
 	fmt.Println("📤 Pushing manifest content to Git repository...")
 
 	// Start port forward for git server
@@ -176,7 +182,7 @@ echo "=== END DOCKER CONTAINER DEBUG ==="
 `, config.GitServerPort)
 
 	dockerCmd := exec.Command("docker", "run", "--rm", "--entrypoint=",
-		"-v", fmt.Sprintf("%s:/source", "."),
+		"-v", fmt.Sprintf("%s:/source", targetDir),
 		"alpine/git:latest", "/bin/sh", "-c", pushScript)
 
 	if verbose {
