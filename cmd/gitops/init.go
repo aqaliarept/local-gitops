@@ -15,18 +15,29 @@ var initCmd = &cobra.Command{
 	RunE:  runInit,
 }
 
+var (
+	initClusterName     string
+	initArgoCDPort      string
+	initChartMuseumPort string
+	initGitServerPort   string
+)
+
 func init() {
+	initCmd.Flags().StringVar(&initClusterName, "cluster", "devcluster", "k3d cluster name for this project")
+	initCmd.Flags().StringVar(&initArgoCDPort, "argocd-port", "8083", "ArgoCD server port")
+	initCmd.Flags().StringVar(&initChartMuseumPort, "chartmuseum-port", "8084", "ChartMuseum server port")
+	initCmd.Flags().StringVar(&initGitServerPort, "git-server-port", "8085", "Git server port")
 	rootCmd.AddCommand(initCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
-	if initDir == "" {
+	if targetDir == "" {
 		return fmt.Errorf("init directory is required")
 	}
 
 	// Check if directory already exists
-	if _, err := os.Stat(initDir); err == nil {
-		return fmt.Errorf("directory %s already exists", initDir)
+	if _, err := os.Stat(targetDir); err == nil {
+		return fmt.Errorf("directory %s already exists", targetDir)
 	}
 
 	// Create directory structure
@@ -49,10 +60,15 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create README: %w", err)
 	}
 
-	fmt.Printf("✅ GitOps directory initialized successfully: %s\n", initDir)
+	// Create config file
+	if err := createConfig(); err != nil {
+		return fmt.Errorf("failed to create config: %w", err)
+	}
+
+	fmt.Printf("✅ GitOps directory initialized successfully: %s\n", targetDir)
 	fmt.Println("")
 	fmt.Println("📋 Next steps:")
-	fmt.Printf("  1. cd %s\n", initDir)
+	fmt.Printf("  1. cd %s\n", targetDir)
 	fmt.Println("  2. gitops setup")
 	fmt.Println("  3. gitops deploy")
 	fmt.Println("")
@@ -62,6 +78,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	fmt.Println("  │   ├── service.yaml")
 	fmt.Println("  │   └── ingress.yaml")
 	fmt.Println("  ├── bootstrap.yaml")
+	fmt.Println("  ├── .gitops-config.yaml")
 	fmt.Println("  └── README.md")
 
 	return nil
@@ -69,7 +86,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 func createDirectoryStructure() error {
 	dirs := []string{
-		filepath.Join(initDir, "manifest"),
+		filepath.Join(targetDir, "manifest"),
 	}
 
 	for _, dir := range dirs {
@@ -104,7 +121,7 @@ spec:
     - CreateNamespace=true
 `
 
-	bootstrapPath := filepath.Join(initDir, "bootstrap.yaml")
+	bootstrapPath := filepath.Join(targetDir, "bootstrap.yaml")
 	return os.WriteFile(bootstrapPath, []byte(bootstrapYAML), 0644)
 }
 
@@ -140,7 +157,7 @@ spec:
             cpu: "500m"
 `
 
-	deploymentPath := filepath.Join(initDir, "manifest", "deployment.yaml")
+	deploymentPath := filepath.Join(targetDir, "manifest", "deployment.yaml")
 	if err := os.WriteFile(deploymentPath, []byte(deploymentYAML), 0644); err != nil {
 		return err
 	}
@@ -162,7 +179,7 @@ spec:
     app: nginx-app
 `
 
-	servicePath := filepath.Join(initDir, "manifest", "service.yaml")
+	servicePath := filepath.Join(targetDir, "manifest", "service.yaml")
 	if err := os.WriteFile(servicePath, []byte(serviceYAML), 0644); err != nil {
 		return err
 	}
@@ -189,7 +206,7 @@ spec:
               number: 80
 `
 
-	ingressPath := filepath.Join(initDir, "manifest", "ingress.yaml")
+	ingressPath := filepath.Join(targetDir, "manifest", "ingress.yaml")
 	if err := os.WriteFile(ingressPath, []byte(ingressYAML), 0644); err != nil {
 		return err
 	}
@@ -221,6 +238,20 @@ This directory contains a simple nginx application deployed using GitOps princip
 The nginx application will be available at http://nginx.localhost
 `
 
-	readmePath := filepath.Join(initDir, "README.md")
+	readmePath := filepath.Join(targetDir, "README.md")
 	return os.WriteFile(readmePath, []byte(readmeContent), 0644)
+}
+
+func createConfig() error {
+	configContent := fmt.Sprintf(`# GitOps Configuration
+cluster_name: %s
+registry_name: myregistry.localhost
+registry_port: 5001
+argocd_port: %s
+chartmuseum_port: %s
+git_server_port: %s
+`, initClusterName, initArgoCDPort, initChartMuseumPort, initGitServerPort)
+
+	configPath := filepath.Join(targetDir, ".gitops-config.yaml")
+	return os.WriteFile(configPath, []byte(configContent), 0644)
 }

@@ -2,10 +2,9 @@ package main
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -13,27 +12,27 @@ import (
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Setup the complete GitOps environment",
-	Long:  "Sets up k3d cluster, ArgoCD, ChartMuseum, Git server, and all necessary resources",
+	Short: "Setup local GitOps environment",
+	Long:  "Creates k3d cluster, installs ArgoCD, ChartMuseum, and Git server",
 	RunE:  runSetup,
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
 	fmt.Println("🚀 Setting up Local GitOps Environment...")
 
+	// Read configuration
+	config, err := readConfig(".")
+	if err != nil {
+		return fmt.Errorf("failed to read config: %w", err)
+	}
+
+	if verbose {
+		fmt.Printf("📋 Using cluster name: %s\n", config.ClusterName)
+	}
+
 	// Check prerequisites
 	if err := checkPrerequisites(); err != nil {
 		return fmt.Errorf("prerequisites check failed: %w", err)
-	}
-
-	// Create directories
-	if err := createDirectories(); err != nil {
-		return fmt.Errorf("failed to create directories: %w", err)
-	}
-
-	// Initialize git repository for manifests
-	if err := initManifestRepo(); err != nil {
-		return fmt.Errorf("failed to initialize manifest repository: %w", err)
 	}
 
 	// Create local registry
@@ -42,7 +41,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create k3d cluster
-	if err := createCluster(); err != nil {
+	if err := createCluster(config.ClusterName); err != nil {
 		return fmt.Errorf("failed to create cluster: %w", err)
 	}
 
@@ -51,78 +50,47 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to install ArgoCD: %w", err)
 	}
 
-	// Setup Kubernetes resources
-	if err := setupK8sResources(); err != nil {
-		return fmt.Errorf("failed to setup Kubernetes resources: %w", err)
+	// Install ChartMuseum
+	if err := installChartMuseum(); err != nil {
+		return fmt.Errorf("failed to install ChartMuseum: %w", err)
 	}
 
-	fmt.Println("🎉 Setup completed successfully!")
-	printAccessInfo()
+	// Install Git server
+	if err := setupGitServer(); err != nil {
+		return fmt.Errorf("failed to install Git server: %w", err)
+	}
 
+	// Setup Git repository
+	if err := setupGitRepository(); err != nil {
+		return fmt.Errorf("failed to setup Git repository: %w", err)
+	}
+
+	// Print status
+	printStatus(config)
+
+	fmt.Println("✅ Local GitOps Environment setup completed!")
 	return nil
 }
 
 func checkPrerequisites() error {
-	fmt.Println("📋 Checking prerequisites...")
+	fmt.Println("🔍 Checking prerequisites...")
 
-	required := []string{"k3d", "docker", "helm", "kubectl", "htpasswd", "curl", "lsof", "jq"}
-
-	for _, cmd := range required {
-		if _, err := exec.LookPath(cmd); err != nil {
-			return fmt.Errorf("required command not found: %s", cmd)
-		}
+	// Check if k3d is installed
+	if _, err := runCommand(exec.Command("k3d", "version"), "k3d version"); err != nil {
+		return fmt.Errorf("k3d is not installed or not in PATH")
 	}
 
-	fmt.Println("✅ All prerequisites found")
-	return nil
-}
-
-func createDirectories() error {
-	fmt.Println("📁 Creating directories...")
-
-	dirs := []string{
-		filepath.Join(manifestRepoPath, "..", "charts"),
-		filepath.Join(manifestRepoPath, "..", "packages"),
+	// Check if kubectl is installed
+	if _, err := runCommand(exec.Command("kubectl", "version", "--client"), "kubectl version"); err != nil {
+		return fmt.Errorf("kubectl is not installed or not in PATH")
 	}
 
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
-		}
+	// Check if docker is running
+	if _, err := runCommand(exec.Command("docker", "version"), "docker version"); err != nil {
+		return errors.New("docker is not running or not in PATH")
 	}
 
-	return nil
-}
-
-func initManifestRepo() error {
-	fmt.Println("🔧 Initializing git repository for manifests...")
-
-	// Check if already a git repo
-	if _, err := os.Stat(filepath.Join(manifestRepoPath, ".git")); err == nil {
-		fmt.Println("ℹ️  Manifest repository already initialized")
-		return nil
-	}
-
-	// Initialize git repository
-	cmd := exec.Command("git", "init")
-	cmd.Dir = manifestRepoPath
-	if err := runCommandInteractive(cmd, "git init"); err != nil {
-		return fmt.Errorf("failed to initialize git repository: %w", err)
-	}
-
-	// Configure git user
-	configCmd := exec.Command("git", "config", "user.name", "Local GitOps")
-	configCmd.Dir = manifestRepoPath
-	if err := runCommandInteractive(configCmd, "git config user.name"); err != nil {
-		return fmt.Errorf("failed to configure git user: %w", err)
-	}
-
-	configCmd = exec.Command("git", "config", "user.email", "local@gitops.dev")
-	configCmd.Dir = manifestRepoPath
-	if err := runCommandInteractive(configCmd, "git config user.email"); err != nil {
-		return fmt.Errorf("failed to configure git email: %w", err)
-	}
-
+	fmt.Println("✅ Prerequisites check passed")
 	return nil
 }
 
@@ -133,254 +101,318 @@ func createRegistry() error {
 	cmd := exec.Command("k3d", "registry", "list")
 	output, err := runCommand(cmd, "k3d registry list")
 	if err != nil {
-		return fmt.Errorf("failed to list registries: %w", err)
+		return err
 	}
 
 	if strings.Contains(string(output), registryName) {
-		fmt.Println("ℹ️  Registry already exists")
+		fmt.Printf("ℹ️  Registry %s already exists\n", registryName)
 		return nil
 	}
 
 	// Create registry
 	cmd = exec.Command("k3d", "registry", "create", registryName, "--port", registryPort)
-	if err := runCommandInteractive(cmd, "k3d registry create"); err != nil {
-		return fmt.Errorf("failed to create registry: %w", err)
+	if _, err := runCommand(cmd, "k3d registry create"); err != nil {
+		return err
 	}
 
 	fmt.Printf("✅ Registry created at %s:%s\n", registryName, registryPort)
 	return nil
 }
 
-func createCluster() error {
-	fmt.Println("☸️  Creating k3d cluster...")
+func createCluster(clusterName string) error {
+	fmt.Println("🏗️  Creating k3d cluster...")
 
 	// Check if cluster already exists
 	cmd := exec.Command("k3d", "cluster", "list")
 	output, err := runCommand(cmd, "k3d cluster list")
 	if err != nil {
-		return fmt.Errorf("failed to list clusters: %w", err)
+		return err
 	}
 
 	if strings.Contains(string(output), clusterName) {
-		fmt.Println("ℹ️  Cluster already exists, deleting...")
-		cmd = exec.Command("k3d", "cluster", "delete", clusterName)
-		if err := runCommandInteractive(cmd, "k3d cluster delete"); err != nil {
-			return fmt.Errorf("failed to delete existing cluster: %w", err)
-		}
+		fmt.Printf("ℹ️  Cluster %s already exists\n", clusterName)
+		return nil
 	}
 
-	// Create cluster with registry and port mappings
-	// Convert manifest repo path to absolute path for k3d
-	absManifestPath, err := filepath.Abs(manifestRepoPath)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path for manifest repository: %w", err)
-	}
-
+	// Create cluster with registry
 	cmd = exec.Command("k3d", "cluster", "create", clusterName,
 		"--registry-use", fmt.Sprintf("k3d-%s:%s", registryName, registryPort),
-		"-v", fmt.Sprintf("%s:/data/manifests@server:0", absManifestPath),
-		"-p", "8083:80@loadbalancer",
-		"-p", "8084:8080@loadbalancer",
-		"-p", "8085:8080@loadbalancer",
-		"--wait")
-
-	if err := runCommandInteractive(cmd, "k3d cluster create"); err != nil {
-		return fmt.Errorf("failed to create cluster: %w", err)
-	}
-
-	fmt.Println("✅ Cluster created with registry integration")
-
-	// Wait for cluster to be ready
-	fmt.Println("⏳ Waiting for cluster to be ready...")
-	cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "nodes", "--all", "--timeout=300s")
-	if err := runCommandInteractive(cmd, "kubectl wait for cluster readiness"); err != nil {
-		return fmt.Errorf("failed to wait for cluster readiness: %w", err)
+		"--port", "8080:80@loadbalancer",
+		"--port", "8443:443@loadbalancer")
+	if _, err := runCommand(cmd, "k3d cluster create"); err != nil {
+		return err
 	}
 
 	// Set kubeconfig
-	cmd = exec.Command("k3d", "kubeconfig", "write", clusterName)
-	output, err = runCommand(cmd, "k3d kubeconfig write")
-	if err != nil {
-		return fmt.Errorf("failed to get kubeconfig: %w", err)
+	if err := setKubeconfig(clusterName); err != nil {
+		return err
 	}
 
-	os.Setenv("KUBECONFIG", strings.TrimSpace(string(output)))
-	fmt.Println("✅ Kubeconfig configured")
-
+	fmt.Printf("✅ Cluster %s created successfully\n", clusterName)
 	return nil
 }
 
 func installArgoCD() error {
-	fmt.Println("🔄 Installing ArgoCD...")
+	fmt.Println("🚀 Installing ArgoCD...")
 
-	// Create namespace
-	cmd := exec.Command("kubectl", "create", "namespace", "argocd", "--dry-run=client", "-o", "yaml")
-	output, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("failed to create namespace: %w", err)
-	}
-
-	cmd = exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(string(output))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to apply namespace: %w", err)
-	}
+	// Create argocd namespace
+	cmd := exec.Command("kubectl", "create", "namespace", "argocd")
+	runCommand(cmd, "kubectl create namespace argocd") // Ignore error if namespace exists
 
 	// Install ArgoCD
 	cmd = exec.Command("kubectl", "apply", "-n", "argocd", "-f", "https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to install ArgoCD: %w", err)
+	if _, err := runCommand(cmd, "kubectl apply ArgoCD"); err != nil {
+		return err
 	}
 
 	// Wait for ArgoCD to be ready
 	fmt.Println("⏳ Waiting for ArgoCD to be ready...")
 	cmd = exec.Command("kubectl", "wait", "--for=condition=available", "--timeout=300s", "deployment/argocd-server", "-n", "argocd")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to wait for ArgoCD: %w", err)
+	if _, err := runCommand(cmd, "kubectl wait ArgoCD"); err != nil {
+		return err
 	}
 
-	// Configure admin password
+	// Configure ArgoCD password
 	if err := configureArgoCDPassword(); err != nil {
 		return fmt.Errorf("failed to configure ArgoCD password: %w", err)
 	}
 
+	fmt.Println("✅ ArgoCD installed successfully")
 	return nil
 }
 
 func configureArgoCDPassword() error {
-	fmt.Println("🔑 Setting up ArgoCD admin credentials...")
+	fmt.Println("🔐 Configuring ArgoCD password...")
 
-	// Generate bcrypt hash for 'admin' password
-	cmd := exec.Command("htpasswd", "-niB", "admin")
-	cmd.Stdin = strings.NewReader("admin")
-	output, err := runCommand(cmd, "htpasswd generate password hash")
+	// Hardcoded bcrypt hash for password "admin"
+	// Generated with: htpasswd -nbB admin admin
+	adminPasswordHash := "$2y$05$JCbgj53Ew6p9TAaNUAk9cu15EB4yrjPp6yI3ucUl5MdmuiYM54.O2"
+
+	// Update password to 'admin' using the hardcoded hash
+	patchData := fmt.Sprintf(`{"stringData":{"admin.password":"%s"}}`, adminPasswordHash)
+	cmd := exec.Command("kubectl", "-n", "argocd", "patch", "secret", "argocd-secret", "-p", patchData)
+	if _, err := runCommand(cmd, "kubectl patch ArgoCD secret"); err != nil {
+		return err
+	}
+
+	// Verify password was set correctly
+	fmt.Println("🔍 Verifying ArgoCD password configuration...")
+	cmd = exec.Command("kubectl", "-n", "argocd", "get", "secret", "argocd-secret", "-o", "jsonpath={.data.admin\\.password}")
+	output, err := runCommand(cmd, "kubectl get ArgoCD secret")
 	if err != nil {
-		return fmt.Errorf("failed to generate password hash: %w", err)
+		return fmt.Errorf("failed to verify password: %w", err)
 	}
 
-	hash := strings.TrimSpace(strings.Split(string(output), ":")[1])
+	// Decode base64 and compare with expected hash
+	expectedHash := adminPasswordHash
+	actualHashBase64 := strings.TrimSpace(string(output))
 
-	// Update secret using kubectl patch with proper base64 encoding
-	hashB64 := base64.StdEncoding.EncodeToString([]byte(hash))
-	mtimeB64 := base64.StdEncoding.EncodeToString([]byte("2024-01-01T00:00:00"))
+	// Decode the base64 value from the secret
+	actualHashBytes, err := base64.StdEncoding.DecodeString(actualHashBase64)
+	if err != nil {
+		return fmt.Errorf("failed to decode base64 hash: %w", err)
+	}
+	actualHash := string(actualHashBytes)
 
-	patch := fmt.Sprintf(`{"data":{"admin.password":"%s","admin.passwordMtime":"%s"}}`,
-		hashB64, mtimeB64)
-
-	cmd = exec.Command("kubectl", "patch", "secret", "argocd-secret", "-n", "argocd", "--type", "merge", "-p", patch)
-	if err := runCommandInteractive(cmd, "kubectl patch argocd secret"); err != nil {
-		return fmt.Errorf("failed to update ArgoCD secret: %w", err)
+	if actualHash != expectedHash {
+		return fmt.Errorf("password verification failed: expected %s, got %s", expectedHash, actualHash)
 	}
 
-	// Restart ArgoCD server
-	cmd = exec.Command("kubectl", "rollout", "restart", "deployment/argocd-server", "-n", "argocd")
-	if err := runCommandInteractive(cmd, "kubectl rollout restart argocd-server"); err != nil {
-		return fmt.Errorf("failed to restart ArgoCD server: %w", err)
-	}
-
-	cmd = exec.Command("kubectl", "rollout", "status", "deployment/argocd-server", "-n", "argocd")
-	if err := runCommandInteractive(cmd, "kubectl rollout status argocd-server"); err != nil {
-		return fmt.Errorf("failed to wait for ArgoCD server restart: %w", err)
-	}
-
-	fmt.Println("✅ ArgoCD admin credentials configured (admin/admin)")
+	fmt.Println("✅ ArgoCD password configured and verified (admin/admin)")
 	return nil
 }
 
-func setupK8sResources() error {
-	fmt.Println("📦 Installing Kubernetes resources...")
+func installChartMuseum() error {
+	fmt.Println("📦 Installing ChartMuseum...")
 
-	// Create namespaces
-	namespaces := []string{"chartmuseum", "git-server"}
-	for _, ns := range namespaces {
-		cmd := exec.Command("kubectl", "create", "namespace", ns, "--dry-run=client", "-o", "yaml")
-		output, err := cmd.Output()
-		if err != nil {
-			return fmt.Errorf("failed to create namespace %s: %w", ns, err)
-		}
+	// Create chartmuseum namespace
+	cmd := exec.Command("kubectl", "create", "namespace", "chartmuseum")
+	runCommand(cmd, "kubectl create namespace chartmuseum") // Ignore error if namespace exists
 
-		cmd = exec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = strings.NewReader(string(output))
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to apply namespace %s: %w", ns, err)
-		}
+	// ChartMuseum deployment
+	chartmuseumYAML := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chartmuseum
+  namespace: chartmuseum
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chartmuseum
+  template:
+    metadata:
+      labels:
+        app: chartmuseum
+    spec:
+      containers:
+        - name: chartmuseum
+          image: chartmuseum/chartmuseum:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: STORAGE
+              value: "local"
+            - name: STORAGE_LOCAL_ROOTDIR
+              value: "/charts"
+          volumeMounts:
+            - name: chart-storage
+              mountPath: /charts
+      volumes:
+        - name: chart-storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chartmuseum
+  namespace: chartmuseum
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: chartmuseum`
+
+	cmd = exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(chartmuseumYAML)
+	if _, err := runCommand(cmd, "kubectl apply ChartMuseum"); err != nil {
+		return err
 	}
 
-	// Deploy ChartMuseum
-	fmt.Println("📊 Deploying ChartMuseum...")
-	chartmuseumPath := filepath.Join(manifestRepoPath, "..", "k8s", "chartmuseum", "chartmuseum.yaml")
-	cmd := exec.Command("kubectl", "apply", "-f", chartmuseumPath)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to deploy ChartMuseum: %w", err)
-	}
-
-	// Wait for ChartMuseum
+	// Wait for ChartMuseum to be ready
 	fmt.Println("⏳ Waiting for ChartMuseum to be ready...")
 	cmd = exec.Command("kubectl", "wait", "--for=condition=available", "--timeout=300s", "deployment/chartmuseum", "-n", "chartmuseum")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to wait for ChartMuseum: %w", err)
+	if _, err := runCommand(cmd, "kubectl wait ChartMuseum"); err != nil {
+		return err
 	}
 
-	// Deploy Git server
-	fmt.Println("📦 Deploying Git server...")
-	gitServerPath := filepath.Join(manifestRepoPath, "..", "k8s", "git-server", "git-server.yaml")
-	cmd = exec.Command("kubectl", "apply", "-f", gitServerPath)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to deploy Git server: %w", err)
+	fmt.Println("✅ ChartMuseum installed successfully")
+	return nil
+}
+
+func setupGitServer() error {
+	fmt.Println("📁 Installing Git server...")
+
+	// Git server deployment
+	gitServerYAML := `apiVersion: v1
+kind: Namespace
+metadata:
+  name: git-server
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: git-server-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /data/git-server
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - k3d-local-gitops-server-0
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: git-server-pvc
+  namespace: git-server
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-server
+  namespace: git-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: git-server
+  template:
+    metadata:
+      labels:
+        app: git-server
+    spec:
+      containers:
+        - name: git-server
+          image: moikot/basic-git-server
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - mountPath: /repos
+              name: repo-storage
+      volumes:
+        - name: repo-storage
+          persistentVolumeClaim:
+            claimName: git-server-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-server
+  namespace: git-server
+spec:
+  ports:
+    - port: 80
+      targetPort: 8080
+      name: http
+  selector:
+    app: git-server`
+
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(gitServerYAML)
+	if _, err := runCommand(cmd, "kubectl apply Git server"); err != nil {
+		return err
 	}
 
-	// Wait for Git server
+	// Wait for Git server to be ready
 	fmt.Println("⏳ Waiting for Git server to be ready...")
 	cmd = exec.Command("kubectl", "wait", "--for=condition=available", "--timeout=300s", "deployment/git-server", "-n", "git-server")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to wait for Git server: %w", err)
+	if _, err := runCommand(cmd, "kubectl wait Git server"); err != nil {
+		return err
 	}
 
-	// Setup Git repository
-	if err := setupGitRepository(); err != nil {
-		return fmt.Errorf("failed to setup Git repository: %w", err)
-	}
-
-	fmt.Println("✅ Kubernetes resources setup completed successfully!")
+	fmt.Println("✅ Git server installed successfully")
 	return nil
 }
 
 func setupGitRepository() error {
-	fmt.Println("📁 Creating Git repository...")
+	fmt.Println("📁 Git repository setup...")
 
-	// Create Git repository directory
-	cmd := exec.Command("kubectl", "exec", "-n", "git-server", "deployment/git-server", "--", "mkdir", "-p", "/git")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create git directory: %w", err)
-	}
-
-	// Initialize bare Git repository
-	fmt.Println("🔧 Initializing bare Git repository...")
-	initScript := `
-echo 'Initializing bare repository...'
-git init --bare /git/manifest.git
-echo 'Git repository initialized successfully'
-`
-
-	cmd = exec.Command("kubectl", "exec", "-n", "git-server", "deployment/git-server", "--", "sh", "-c", initScript)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to initialize git repository: %w", err)
-	}
+	// The moikot/basic-git-server automatically provides git server functionality
+	// No manual repository initialization needed
 
 	fmt.Println("✅ Git repository setup completed")
 	return nil
 }
 
-func printAccessInfo() {
+func printStatus(config *Config) error {
 	fmt.Println("")
-	fmt.Println("📋 Access Information:")
-	fmt.Println("  ArgoCD UI: http://localhost:8083")
-	fmt.Println("  ArgoCD Username: admin")
-	fmt.Println("  ArgoCD Password: admin")
-	fmt.Println("  ChartMuseum: http://localhost:8084")
-	fmt.Printf("  Local Registry: %s:%s\n", registryName, registryPort)
+	fmt.Println("📊 Setup Status:")
+	fmt.Println("==================")
+	fmt.Printf("  Cluster: %s\n", config.ClusterName)
+	fmt.Printf("  Local Registry: %s:%s\n", config.RegistryName, config.RegistryPort)
+	fmt.Printf("  ArgoCD: http://localhost:%s (admin/admin)\n", config.ArgoCDPort)
+	fmt.Printf("  ChartMuseum: http://localhost:%s\n", config.ChartMuseumPort)
+	fmt.Printf("  Git Server: http://localhost:%s\n", config.GitServerPort)
 	fmt.Println("")
-	fmt.Printf("📁 Manifest Repository: %s\n", manifestRepoPath)
-	fmt.Println("")
-	fmt.Println("✅ Local GitOps environment is ready!")
+	fmt.Println("🌐 To access services, run:")
+	fmt.Println("  gitops port-forward")
+	return nil
 }

@@ -1,5 +1,23 @@
 # Local GitOps Environment - Git Ignore
 
+# Go build artifacts
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go modules
+go.work
+go.work.sum
+
 # Packages directory (generated Helm packages)
 packages/
 
@@ -82,3 +100,4 @@ argocd-applications/
 
 # Docker volumes (if any)
 docker-volumes/
+bin/gitops

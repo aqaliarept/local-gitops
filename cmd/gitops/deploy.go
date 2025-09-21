@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,18 +18,25 @@ var deployCmd = &cobra.Command{
 }
 
 var (
-	appName            = "nginx-app"
-	argocdNamespace    = "argocd"
-	deployChartName    = "nginx-app"
-	deployChartVersion = "0.1.0"
-	valuesPath         = "nginx-app-values.yaml"
+	appName         = "nginx-app"
+	argocdNamespace = "argocd"
 )
 
 func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Println("🚀 Deploying application...")
 
+	// Read configuration
+	config, err := readConfig(".")
+	if err != nil {
+		return fmt.Errorf("failed to read config: %w", err)
+	}
+
+	if verbose {
+		fmt.Printf("📋 Using cluster name: %s\n", config.ClusterName)
+	}
+
 	// Check prerequisites
-	if err := checkDeployPrerequisites(); err != nil {
+	if err := checkDeployPrerequisites(config.ClusterName); err != nil {
 		return fmt.Errorf("prerequisites check failed: %w", err)
 	}
 
@@ -40,15 +46,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	// Push manifest content to Git repository
-	if err := pushManifestContent(); err != nil {
+	if err := pushManifestContent(config); err != nil {
 		return fmt.Errorf("failed to push manifest content: %w", err)
+	}
+
+	// Sync ArgoCD application
+	if err := syncArgoCDApplication(); err != nil {
+		return fmt.Errorf("failed to sync ArgoCD application: %w", err)
 	}
 
 	fmt.Println("✅ Deployment completed successfully!")
 	return nil
 }
 
-func checkDeployPrerequisites() error {
+func checkDeployPrerequisites(clusterName string) error {
 	// Check if kubectl is available
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		return fmt.Errorf("kubectl is required but not installed")
@@ -86,8 +97,8 @@ func checkDeployPrerequisites() error {
 func applyBootstrap() error {
 	fmt.Println("📋 Applying bootstrap.yaml...")
 
-	// Check if bootstrap.yaml exists
-	bootstrapPath := filepath.Join(manifestRepoPath, "bootstrap.yaml")
+	// Check if bootstrap.yaml exists in current directory
+	bootstrapPath := "bootstrap.yaml"
 	if _, err := os.Stat(bootstrapPath); err != nil {
 		return fmt.Errorf("bootstrap.yaml not found: %w", err)
 	}
@@ -102,25 +113,39 @@ func applyBootstrap() error {
 	return nil
 }
 
-func pushManifestContent() error {
+func pushManifestContent(config *Config) error {
 	fmt.Println("📤 Pushing manifest content to Git repository...")
 
 	// Start port forward for git server
 	fmt.Println("🌐 Starting Git server port forward...")
-	cmd := exec.Command("kubectl", "port-forward", "-n", "git-server", "svc/git-server", "8085:80")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
+	portForwardCmd := exec.Command("kubectl", "port-forward", "-n", "git-server", "svc/git-server", fmt.Sprintf("%s:80", config.GitServerPort))
+	portForwardCmd.Stdout = nil
+	portForwardCmd.Stderr = nil
+	if err := portForwardCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start port forward: %w", err)
 	}
-	defer cmd.Process.Kill()
+	defer func() {
+		if portForwardCmd.Process != nil {
+			portForwardCmd.Process.Kill()
+		}
+	}()
 
 	// Wait for port forward to establish
-	time.Sleep(2 * time.Second)
+	fmt.Println("⏳ Waiting for port forward to establish...")
+	time.Sleep(3 * time.Second)
+
+	// Test if port forward is working
+	fmt.Println("🔍 Testing port forward connection...")
+	testCmd := exec.Command("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", fmt.Sprintf("http://localhost:%s/manifest.git/info/refs?service=git-upload-pack", config.GitServerPort))
+	output, err := testCmd.Output()
+	if err != nil || strings.TrimSpace(string(output)) != "200" {
+		return fmt.Errorf("port forward test failed: %w", err)
+	}
+	fmt.Println("✅ Port forward is working")
 
 	// Use Docker container to copy manifest folder content, init git repo, and push
 	fmt.Println("🐳 Using Docker container to copy manifest folder, init, and push...")
-	pushScript := `
+	pushScript := fmt.Sprintf(`
 set -e  # Exit on any error
 echo "=== DOCKER CONTAINER DEBUG ==="
 echo "Source directory contents:"
@@ -139,7 +164,7 @@ git init
 git config --global user.email 'gitops@example.com'
 git config --global user.name 'GitOps CLI'
 echo "Adding remote origin..."
-git remote add origin http://host.docker.internal:8085/manifest.git
+git remote add origin http://host.docker.internal:%s/manifest.git
 echo "Adding and committing files..."
 git add .
 echo "Git status after add:"
@@ -148,21 +173,58 @@ git commit -m "Initial commit: nginx application manifests"
 echo "Pushing to remote repository..."
 git push -u origin master --force
 echo "=== END DOCKER CONTAINER DEBUG ==="
-`
+`, config.GitServerPort)
 
-	cmd = exec.Command("docker", "run", "--rm", "--entrypoint=",
-		"-v", fmt.Sprintf("%s:/source", manifestRepoPath),
+	dockerCmd := exec.Command("docker", "run", "--rm", "--entrypoint=",
+		"-v", fmt.Sprintf("%s:/source", "."),
 		"alpine/git:latest", "/bin/sh", "-c", pushScript)
 
 	if verbose {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		dockerCmd.Stdout = os.Stdout
+		dockerCmd.Stderr = os.Stderr
 	}
 
-	if err := cmd.Run(); err != nil {
+	if err := dockerCmd.Run(); err != nil {
 		return fmt.Errorf("failed to push manifest content: %w", err)
 	}
 
 	fmt.Println("✅ Manifest content pushed successfully")
+	return nil
+}
+
+func syncArgoCDApplication() error {
+	fmt.Println("🔄 Syncing ArgoCD application...")
+
+	// Wait a moment for the git push to be available
+	time.Sleep(2 * time.Second)
+
+	// Trigger ArgoCD application sync
+	cmd := exec.Command("kubectl", "patch", "application", appName, "-n", argocdNamespace, "--type", "merge", "--patch", `{"operation":{"sync":{}}}`)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to trigger ArgoCD sync: %w", err)
+	}
+
+	// Wait for sync to complete
+	fmt.Println("⏳ Waiting for ArgoCD sync to complete...")
+	time.Sleep(5 * time.Second)
+
+	// Check sync status
+	cmd = exec.Command("kubectl", "get", "application", appName, "-n", argocdNamespace, "-o", "jsonpath={.status.sync.status}")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to check sync status: %w", err)
+	}
+
+	syncStatus := strings.TrimSpace(string(output))
+	if verbose {
+		fmt.Printf("📋 ArgoCD sync status: %s\n", syncStatus)
+	}
+
+	if syncStatus == "Synced" {
+		fmt.Println("✅ ArgoCD application synced successfully")
+	} else {
+		fmt.Printf("⚠️  ArgoCD application sync status: %s (may still be in progress)\n", syncStatus)
+	}
+
 	return nil
 }

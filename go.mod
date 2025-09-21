@@ -1,4 +1,4 @@
-module local-gitops
+module github.com/aqaliarept/local-gitops
 
 go 1.21
 
